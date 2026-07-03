@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>NEON SNAKE - Day 5</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;user-select:none}
+  html,body{overflow:hidden;touch-action:none;background:#04080c}
+  body{font-family:'Courier New',monospace;color:#eee;display:flex;flex-direction:column;align-items:center;padding:12px}
+  h1{font-size:24px;letter-spacing:5px;color:#00ff88;text-shadow:0 0 14px rgba(0,255,136,.45);margin-bottom:2px}
+  #sub{color:#666;font-size:11px;margin-bottom:8px}
+  #hud{display:flex;gap:22px;font-size:13px;color:#00ff88;margin-bottom:7px}
+  #wrap{position:relative;border:2px solid #0a2016;box-shadow:0 0 28px rgba(0,255,136,.07)}
+  canvas{display:block}
+  #overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(4,8,12,.9);text-align:center;padding:20px}
+  #overlay h2{font-size:21px;color:#00ff88;letter-spacing:3px;margin-bottom:10px}
+  #overlay p{font-size:11.5px;color:#888;max-width:300px;line-height:1.6;margin-bottom:18px}
+  #overlay button{background:#00ff88;color:#04080c;border:none;font-family:inherit;font-weight:bold;font-size:13px;padding:10px 28px;border-radius:6px;cursor:pointer;letter-spacing:2px}
+  #overlay button:active{background:#00ccff}
+  #btns{margin-top:11px;display:flex;gap:10px}
+  #btns button{background:#0a1014;border:1px solid #1a2a1a;color:#aaa;padding:7px 14px;font-family:inherit;font-size:12px;cursor:pointer;border-radius:6px}
+  #btns button:hover{border-color:#00ff88}
+  #info{margin-top:8px;font-size:10px;color:#333;text-align:center;max-width:340px}
+  @media(max-width:480px){h1{font-size:18px}#hud{font-size:11px;gap:14px}}
+</style>
+</head>
+<body>
+<h1>NEON SNAKE</h1>
+<div id="sub">Day 5 — grow longer, don't bite yourself</div>
+<div id="hud">
+  <div id="scoreLabel">SCORE: 0</div>
+  <div id="bestLabel">BEST: 0</div>
+  <div id="lenLabel">LENGTH: 3</div>
+</div>
+<div id="wrap">
+  <canvas id="g" width="360" height="480"></canvas>
+  <div id="overlay">
+    <h2>NEON SNAKE</h2>
+    <p>Swipe or use arrow keys / WASD to steer. Eat food to grow and score. Golden food gives a x3 bonus. Eating your own tail ends the run.</p>
+    <button id="startBtn">START</button>
+  </div>
+</div>
+<div id="btns">
+  <button id="muteBtn">SOUND: ON</button>
+  <button id="restartBtn">RESTART</button>
+</div>
+<div id="info">Swipe anywhere or use arrow keys / WASD. Speed increases every 5 foods eaten.</div>
+
+<script>
+(function(){
+/* ── Audio ── */
+var AC=null,muted=false;
+function ac(){if(!AC)AC=new(window.AudioContext||window.webkitAudioContext)();return AC;}
+function beep(f,d,t,v){
+  if(muted)return;
+  try{var c=ac(),o=c.createOscillator(),g=c.createGain();
+    o.type=t||'square';o.frequency.setValueAtTime(f,c.currentTime);
+    g.gain.setValueAtTime(v||.06,c.currentTime);
+    g.gain.exponentialRampToValueAtTime(.001,c.currentTime+d);
+    o.connect(g);g.connect(c.destination);o.start();o.stop(c.currentTime+d);}catch(e){}
+}
+function sndEat(){beep(440,.07,'sine',.07);}
+function sndGold(){beep(660,.07,'sine',.08);setTimeout(function(){beep(880,.1,'sine',.07);},70);}
+function sndDie(){beep(180,.1,'sawtooth',.09);setTimeout(function(){beep(110,.22,'sawtooth',.1);},110);}
+function sndTurn(){beep(200,.04,'square',.03);}
+function sndStart(){beep(400,.08,'square',.06);}
+function unlock(){try{var c=ac();if(c.state==='suspended')c.resume();}catch(e){}}
+document.addEventListener('touchstart',unlock,{once:true});
+document.addEventListener('click',unlock,{once:true});
+
+/* ── Canvas ── */
+var cv=document.getElementById('g'),cx=cv.getContext('2d'),W=cv.width,H=cv.height;
+var overlay=document.getElementById('overlay');
+var oH2=overlay.querySelector('h2'),oP=overlay.querySelector('p'),startBtn=document.getElementById('startBtn');
+var scoreLabel=document.getElementById('scoreLabel'),bestLabel=document.getElementById('bestLabel'),lenLabel=document.getElementById('lenLabel');
+
+/* ── Grid ── */
+var CELL=20,COLS=W/CELL,ROWS=H/CELL; // 18x24
+
+/* ── State ── */
+var snake,dir,nextDir,food,goldFood,score,best=0,eaten,running=false;
+var stepMs,stepAcc,particles=[];
+
+function rnd(max){return Math.floor(Math.random()*max);}
+function key(x,y){return x+','+y;}
+
+function freeCell(body){
+  var occ={};
+  body.forEach(function(s){occ[key(s.x,s.y)]=1;});
+  var attempts=0;
+  while(attempts++<500){
+    var x=rnd(COLS),y=rnd(ROWS);
+    if(!occ[key(x,y)])return{x:x,y:y};
+  }
+  return null;
+}
+
+function resetState(){
+  var sx=Math.floor(COLS/2),sy=Math.floor(ROWS/2);
+  snake=[{x:sx,y:sy},{x:sx-1,y:sy},{x:sx-2,y:sy}];
+  dir={x:1,y:0};nextDir={x:1,y:0};
+  score=0;eaten=0;
+  stepMs=180;stepAcc=0;
+  particles=[];
+  food=freeCell(snake);
+  goldFood=null;
+  updateHud();
+}
+
+function updateHud(){
+  scoreLabel.textContent='SCORE: '+score;
+  bestLabel.textContent='BEST: '+best;
+  lenLabel.textContent='LENGTH: '+snake.length;
+}
+
+/* ── Particles ── */
+function burst(px,py,col){
+  for(var i=0;i<10;i++){
+    var a=Math.random()*Math.PI*2,sp=1.2+Math.random()*2.5;
+    particles.push({x:px,y:py,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:20,max:20,col:col});
+  }
+}
+
+/* ── Step ── */
+function step(){
+  dir.x=nextDir.x;dir.y=nextDir.y;
+  var head={x:(snake[0].x+dir.x+COLS)%COLS, y:(snake[0].y+dir.y+ROWS)%ROWS};
+
+  /* self-collision */
+  for(var i=1;i<snake.length;i++){
+    if(snake[i].x===head.x&&snake[i].y===head.y){die();return;}
+  }
+
+  snake.unshift(head);
+
+  var ate=false,gold=false;
+  if(food&&head.x===food.x&&head.y===food.y){
+    ate=true;food=freeCell(snake);eaten++;
+    score+=10;sndEat();
+    burst(head.x*CELL+CELL/2,head.y*CELL+CELL/2,'#00ff88');
+    if(eaten%5===0) stepMs=Math.max(60,stepMs-18);
+    if(!goldFood&&Math.random()<.25) goldFood=freeCell(snake);
+  } else if(goldFood&&head.x===goldFood.x&&head.y===goldFood.y){
+    ate=true;gold=true;goldFood=null;eaten++;
+    score+=30;sndGold();
+    burst(head.x*CELL+CELL/2,head.y*CELL+CELL/2,'#ffe066');
+  }
+
+  if(!ate) snake.pop();
+  if(score>best)best=score;
+  updateHud();
+}
+
+function die(){
+  running=false;
+  sndDie();
+  if(score>best)best=score;
+  updateHud();
+  setTimeout(showDead,350);
+}
+
+function showDead(){
+  oH2.textContent='YOU DIED';
+  oP.textContent='Length: '+snake.length+'  •  Score: '+score+'  •  Best: '+best;
+  startBtn.textContent='PLAY AGAIN';
+  overlay.style.display='flex';
+}
+
+/* ── Draw ── */
+var HUE_SHIFT=0;
+function draw(){
+  cx.clearRect(0,0,W,H);
+  /* bg grid */
+  cx.fillStyle='#04080c';cx.fillRect(0,0,W,H);
+  cx.strokeStyle='rgba(0,255,136,.04)';cx.lineWidth=.5;
+  for(var gx=0;gx<=W;gx+=CELL){cx.beginPath();cx.moveTo(gx,0);cx.lineTo(gx,H);cx.stroke();}
+  for(var gy=0;gy<=H;gy+=CELL){cx.beginPath();cx.moveTo(0,gy);cx.lineTo(W,gy);cx.stroke();}
+
+  /* particles */
+  particles.forEach(function(p){
+    cx.globalAlpha=p.life/p.max;
+    cx.fillStyle=p.col;
+    cx.beginPath();cx.arc(p.x,p.y,2.5*(p.life/p.max),0,Math.PI*2);cx.fill();
+  });
+  cx.globalAlpha=1;
+
+  /* food */
+  if(food){
+    cx.fillStyle='#ff4466';cx.shadowColor='#ff4466';cx.shadowBlur=14;
+    cx.beginPath();cx.arc(food.x*CELL+CELL/2,food.y*CELL+CELL/2,CELL*.38,0,Math.PI*2);cx.fill();
+    cx.shadowBlur=0;
+  }
+  if(goldFood){
+    cx.fillStyle='#ffe066';cx.shadowColor='#ffe066';cx.shadowBlur=16;
+    cx.beginPath();
+    var gx2=goldFood.x*CELL+CELL/2,gy2=goldFood.y*CELL+CELL/2,gr=CELL*.38;
+    for(var s=0;s<5;s++){
+      var a1=s*Math.PI*2/5-Math.PI/2,a2=(s+.5)*Math.PI*2/5-Math.PI/2;
+      s===0?cx.moveTo(gx2+Math.cos(a1)*gr,gy2+Math.sin(a1)*gr):cx.lineTo(gx2+Math.cos(a1)*gr,gy2+Math.sin(a1)*gr);
+      cx.lineTo(gx2+Math.cos(a2)*gr*.42,gy2+Math.sin(a2)*gr*.42);
+    }
+    cx.closePath();cx.fill();cx.shadowBlur=0;
+  }
+
+  /* snake */
+  snake.forEach(function(seg,i){
+    var t=i/snake.length;
+    var r=Math.round(0+t*0),g2=Math.round(255-t*120),b=Math.round(136-t*60);
+    var col='rgb('+r+','+g2+','+b+')';
+    cx.fillStyle=col;
+    if(i===0){cx.shadowColor='#00ff88';cx.shadowBlur=12;}
+    var pad=i===0?1:2;
+    cx.fillRect(seg.x*CELL+pad,seg.y*CELL+pad,CELL-pad*2,CELL-pad*2);
+    cx.shadowBlur=0;
+    /* eyes on head */
+    if(i===0){
+      cx.fillStyle='#04080c';
+      var ex=seg.x*CELL+CELL/2,ey=seg.y*CELL+CELL/2;
+      var perp={x:-dir.y,y:dir.x};
+      var eo=4;
+      cx.beginPath();cx.arc(ex+dir.x*3+perp.x*eo,ey+dir.y*3+perp.y*eo,2,0,Math.PI*2);cx.fill();
+      cx.beginPath();cx.arc(ex+dir.x*3-perp.x*eo,ey+dir.y*3-perp.y*eo,2,0,Math.PI*2);cx.fill();
+    }
+  });
+}
+
+/* ── Loop ── */
+var lastT=null;
+function loop(ts){
+  if(!running)return;
+  if(lastT===null)lastT=ts;
+  var dt=Math.min(ts-lastT,80);lastT=ts;
+  stepAcc+=dt;
+  if(stepAcc>=stepMs){stepAcc-=stepMs;step();}
+  /* update particles */
+  for(var i=particles.length-1;i>=0;i--){
+    var p=particles[i];
+    p.x+=p.vx;p.y+=p.vy;p.vy+=.12;p.life--;
+    if(p.life<=0)particles.splice(i,1);
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function startGame(){
+  resetState();running=true;lastT=null;
+  overlay.style.display='none';
+  sndStart();
+  requestAnimationFrame(loop);
+}
+
+/* ── Input ── */
+startBtn.addEventListener('click',startGame);
+document.getElementById('restartBtn').addEventListener('click',function(){
+  running=false;
+  oH2.textContent='NEON SNAKE';
+  oP.textContent='Swipe or use arrow keys / WASD to steer. Eat food to grow and score. Golden food gives a x3 bonus. Eating your own tail ends the run.';
+  startBtn.textContent='START';
+  overlay.style.display='flex';
+  resetState();
+});
+document.getElementById('muteBtn').addEventListener('click',function(){muted=!muted;this.textContent=muted?'SOUND: OFF':'SOUND: ON';});
+
+function tryDir(dx,dy){
+  if(dx===dir.x*-1&&dy===dir.y*-1)return; /* no 180 */
+  nextDir={x:dx,y:dy};sndTurn();
+}
+
+document.addEventListener('keydown',function(e){
+  var k=e.key;
+  if(k==='ArrowUp'||k==='w'){tryDir(0,-1);e.preventDefault();}
+  else if(k==='ArrowDown'||k==='s'){tryDir(0,1);e.preventDefault();}
+  else if(k==='ArrowLeft'||k==='a'){tryDir(-1,0);e.preventDefault();}
+  else if(k==='ArrowRight'||k==='d'){tryDir(1,0);e.preventDefault();}
+});
+
+var tx0=0,ty0=0;
+cv.addEventListener('touchstart',function(e){tx0=e.touches[0].clientX;ty0=e.touches[0].clientY;},{passive:true});
+cv.addEventListener('touchend',function(e){
+  var dx=e.changedTouches[0].clientX-tx0,dy=e.changedTouches[0].clientY-ty0;
+  if(Math.max(Math.abs(dx),Math.abs(dy))<18)return;
+  if(Math.abs(dx)>Math.abs(dy)) tryDir(dx>0?1:-1,0);
+  else tryDir(0,dy>0?1:-1);
+},{passive:true});
+
+resetState();
+})();
+</script>
+</body>
+</html>
